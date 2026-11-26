@@ -255,6 +255,13 @@ export default function BottomNav() {
           );
         })}
       </nav>
-    </div>
+      </div>
   );
 }
+
+
+
+
+
+
+

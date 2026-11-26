@@ -12,6 +12,7 @@ import {
   Package,
   Save,
   Users,
+  Wallet,
 } from "lucide-react";
 
 import { cn } from "@/utils";
@@ -36,9 +37,15 @@ type ResellerTransaction = {
   namaPelanggan: string | null;
   totalBayar: string;
   sisaUtang: string | null;
+  profitOwner: string | null;
+  profitReseller: string | null;
   createdAt: string;
   items: ResellerItem[];
 };
+
+type TransactionPatch = Partial<
+  Pick<ResellerTransaction, "sisaUtang" | "profitOwner" | "profitReseller">
+>;
 
 type Filter = "semua" | "belum" | "lunas";
 
@@ -82,16 +89,16 @@ export default function Resellers() {
   // GET /owner/getResellerTransactions
   const fetchTransactions = useCallback(async () => {
     try {
-      setLoading(true);
-      setError("");
-
       const token = await getToken();
       if (!token) throw new Error("Sesi login tidak ditemukan.");
 
-    const response = await fetch(
-  `${getBaseUrl()}/owner/getResellerTransactions`,
-  { headers: { Authorization: `Bearer ${token}` } },
-);
+      setLoading(true);
+      setError("");
+
+      const response = await fetch(
+        `${getBaseUrl()}/owner/getResellerTransactions`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
 
       const result = await response.json().catch(() => null);
 
@@ -116,15 +123,13 @@ export default function Resellers() {
   }, [getToken]);
 
   useEffect(() => {
-    void fetchTransactions();
+    void Promise.resolve().then(fetchTransactions);
   }, [fetchTransactions]);
 
   // Perbarui satu transaksi di layar setelah PATCH berhasil.
-  const patchSisaUtang = useCallback((id: string, sisaUtang: number) => {
+  const patchTransaction = useCallback((id: string, patch: TransactionPatch) => {
     setTransactions((prev) =>
-      prev.map((tx) =>
-        tx.id === id ? { ...tx, sisaUtang: String(sisaUtang) } : tx,
-      ),
+      prev.map((tx) => (tx.id === id ? { ...tx, ...patch } : tx)),
     );
   }, []);
 
@@ -165,7 +170,8 @@ export default function Resellers() {
           </h1>
         </div>
         <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
-          Buka transaksi untuk melihat barang dan memperbarui sisa utang.
+          Buka transaksi untuk melihat barang, mencatat pembayaran, dan membagi
+          profit.
         </p>
 
         {!loading && transactions.length > 0 && (
@@ -264,7 +270,7 @@ export default function Resellers() {
               onToggle={() =>
                 setOpenId((prev) => (prev === tx.id ? null : tx.id))
               }
-              onSaved={patchSisaUtang}
+              onSaved={patchTransaction}
             />
           ))}
         </div>
@@ -280,7 +286,7 @@ type TransactionCardProps = {
   tx: ResellerTransaction;
   open: boolean;
   onToggle: () => void;
-  onSaved: (id: string, sisaUtang: number) => void;
+  onSaved: (id: string, patch: TransactionPatch) => void;
 };
 
 function TransactionCard({ tx, open, onToggle, onSaved }: TransactionCardProps) {
@@ -293,27 +299,56 @@ function TransactionCard({ tx, open, onToggle, onSaved }: TransactionCardProps) 
   const persen =
     total > 0 ? Math.min(100, Math.round((dibayar / total) * 100)) : 100;
 
-  const [draft, setDraft] = useState(String(sisa));
+  const [bayarDraft, setBayarDraft] = useState("");
+  const [ownerDraft, setOwnerDraft] = useState(() =>
+    toNum(tx.profitOwner) > 0 ? String(toNum(tx.profitOwner)) : "",
+  );
+  const [resellerDraft, setResellerDraft] = useState(() =>
+    toNum(tx.profitReseller) > 0 ? String(toNum(tx.profitReseller)) : "",
+  );
   const [saving, setSaving] = useState(false);
   const [cardError, setCardError] = useState("");
   const [saved, setSaved] = useState("");
 
-  const draftValue = draft === "" ? 0 : parseAngka(draft);
-  const draftTooBig = draftValue > total;
-  const unchanged = draftValue === sisa;
+  const bayarValue = parseAngka(bayarDraft);
+  const bayarBerlebih = bayarValue > sisa;
 
-  // PATCH /owner/updateReseller  { id, sisaUtang }
-  const save = async (value: number) => {
+  const ownerValue = parseAngka(ownerDraft);
+  const resellerValue = parseAngka(resellerDraft);
+  const profitInvalid =
+    !Number.isSafeInteger(ownerValue) ||
+    !Number.isSafeInteger(resellerValue) ||
+    ownerValue < 0 ||
+    resellerValue < 0;
+
+  const unchanged =
+    bayarValue === 0 &&
+    ownerValue === toNum(tx.profitOwner) &&
+    resellerValue === toNum(tx.profitReseller);
+
+  const clearMessages = () => {
     setCardError("");
     setSaved("");
+  };
+
+  // PATCH /owner/updateReseller  { id, bayar, profitOwner, profitReseller }
+  const save = async (value: number) => {
+    clearMessages();
 
     if (!Number.isSafeInteger(value) || value < 0) {
-      setCardError("Sisa utang tidak valid.");
+      setCardError("Jumlah pembayaran tidak valid.");
       return;
     }
 
-    if (value > total) {
-      setCardError("Sisa utang tidak boleh melebihi total pembayaran.");
+    if (value > sisa) {
+      setCardError(
+        `Pembayaran tidak boleh melebihi sisa utang (${formatRupiah(sisa)}).`,
+      );
+      return;
+    }
+
+    if (profitInvalid) {
+      setCardError("Nilai profit tidak valid.");
       return;
     }
 
@@ -329,18 +364,43 @@ function TransactionCard({ tx, open, onToggle, onSaved }: TransactionCardProps) 
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ id: tx.id, sisaUtang: value }),
+        body: JSON.stringify({
+          id: tx.id,
+          bayar: value,
+          profitOwner: ownerValue,
+          profitReseller: resellerValue,
+        }),
       });
 
       const result = await response.json().catch(() => null);
 
       if (!response.ok) {
-        throw new Error(readMessage(result, "Gagal memperbarui sisa utang."));
+        throw new Error(
+          readMessage(result, "Gagal memperbarui transaksi reseller."),
+        );
       }
 
-      onSaved(tx.id, value);
-      setDraft(String(value));
-      setSaved(value === 0 ? "Ditandai lunas." : "Sisa utang diperbarui.");
+      const updated = (
+        result as { data?: { sisaUtang?: string | null } } | null
+      )?.data;
+      const nextSisa =
+        updated?.sisaUtang != null
+          ? String(updated.sisaUtang)
+          : String(Math.max(0, sisa - value));
+
+      onSaved(tx.id, {
+        sisaUtang: nextSisa,
+        profitOwner: String(ownerValue),
+        profitReseller: String(resellerValue),
+      });
+      setBayarDraft("");
+      setSaved(
+        value === 0
+          ? "Profit diperbarui."
+          : value >= sisa
+            ? "Ditandai lunas."
+            : "Pembayaran dicatat.",
+      );
     } catch (err) {
       setCardError(err instanceof Error ? err.message : "Terjadi kesalahan.");
     } finally {
@@ -480,51 +540,139 @@ function TransactionCard({ tx, open, onToggle, onSaved }: TransactionCardProps) 
             </ul>
           </div>
 
-          {/* Update sisa utang */}
+          {/* Pembagian profit */}
+          <div className="rounded-xl border border-emerald-100 bg-emerald-50/40 p-3 sm:p-4 dark:border-emerald-900/30 dark:bg-emerald-900/10">
+            <div className="mb-3 flex items-center gap-2">
+              <Wallet size={16} className="text-emerald-500" />
+              <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-200">
+                Pembagian profit
+              </h3>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label
+                  htmlFor={`owner-${tx.id}`}
+                  className="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300"
+                >
+                  Profit owner
+                </label>
+                <div className="relative">
+                  <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400">
+                    Rp
+                  </span>
+                  <input
+                    id={`owner-${tx.id}`}
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="off"
+                    value={
+                      ownerDraft === "" ? "" : formatAngka(parseAngka(ownerDraft))
+                    }
+                    placeholder="0"
+                    disabled={saving}
+                    aria-invalid={profitInvalid || undefined}
+                    onChange={(event) => {
+                      setOwnerDraft(event.target.value.replace(/\D/g, ""));
+                      clearMessages();
+                    }}
+                    className={cn(
+                      "w-full rounded-xl border border-emerald-200 bg-white py-2.5 pl-10 pr-3 text-sm tabular-nums text-slate-900 outline-none focus:ring-2 focus:ring-emerald-400/40 disabled:opacity-60 dark:border-emerald-900/30 dark:bg-slate-800 dark:text-white",
+                      profitInvalid && "border-rose-400 focus:ring-rose-400/40",
+                    )}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label
+                  htmlFor={`reseller-${tx.id}`}
+                  className="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300"
+                >
+                  Profit reseller
+                </label>
+                <div className="relative">
+                  <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400">
+                    Rp
+                  </span>
+                  <input
+                    id={`reseller-${tx.id}`}
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="off"
+                    value={
+                      resellerDraft === ""
+                        ? ""
+                        : formatAngka(parseAngka(resellerDraft))
+                    }
+                    placeholder="0"
+                    disabled={saving}
+                    aria-invalid={profitInvalid || undefined}
+                    onChange={(event) => {
+                      setResellerDraft(event.target.value.replace(/\D/g, ""));
+                      clearMessages();
+                    }}
+                    className={cn(
+                      "w-full rounded-xl border border-emerald-200 bg-white py-2.5 pl-10 pr-3 text-sm tabular-nums text-slate-900 outline-none focus:ring-2 focus:ring-emerald-400/40 disabled:opacity-60 dark:border-emerald-900/30 dark:bg-slate-800 dark:text-white",
+                      profitInvalid && "border-rose-400 focus:ring-rose-400/40",
+                    )}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {profitInvalid && (
+              <p className="mt-1.5 text-xs text-rose-600 dark:text-rose-400">
+                Profit harus berupa angka bulat tidak negatif.
+              </p>
+            )}
+          </div>
+
+          {/* Catat pembayaran */}
           <div className="rounded-xl border border-sky-100 bg-sky-50/40 p-3 sm:p-4 dark:border-sky-900/20 dark:bg-slate-800/40">
-            <label
-              htmlFor={`utang-${tx.id}`}
-              className="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300"
-            >
-              Sisa utang
-            </label>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <label
+                htmlFor={`bayar-${tx.id}`}
+                className="text-sm font-medium text-slate-700 dark:text-slate-300"
+              >
+                Uang dibayar
+              </label>
+              <span className="text-xs text-slate-500 dark:text-slate-400">
+                Sisa utang {formatRupiah(sisa)}
+              </span>
+            </div>
 
             <div className="relative">
               <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400">
                 Rp
               </span>
               <input
-                id={`utang-${tx.id}`}
+                id={`bayar-${tx.id}`}
                 type="text"
                 inputMode="numeric"
                 autoComplete="off"
-                value={draft === "" ? "" : formatAngka(parseAngka(draft))}
+                value={bayarDraft === "" ? "" : formatAngka(parseAngka(bayarDraft))}
                 placeholder="0"
                 disabled={saving}
-                aria-invalid={draftTooBig || undefined}
                 onChange={(event) => {
-                  setDraft(event.target.value.replace(/\D/g, ""));
-                  setCardError("");
-                  setSaved("");
+                  setBayarDraft(event.target.value.replace(/\D/g, ""));
+                  clearMessages();
                 }}
-                className={cn(
-                  "w-full rounded-xl border border-sky-200 bg-white py-2.5 pl-10 pr-3 text-sm tabular-nums text-slate-900 outline-none focus:ring-2 focus:ring-sky-400/40 disabled:opacity-60 dark:border-sky-900/30 dark:bg-slate-800 dark:text-white",
-                  draftTooBig && "border-rose-400 focus:ring-rose-400/40",
-                )}
+                className="w-full rounded-xl border border-sky-200 bg-white py-2.5 pl-10 pr-3 text-sm tabular-nums text-slate-900 outline-none focus:ring-2 focus:ring-sky-400/40 disabled:opacity-60 dark:border-sky-900/30 dark:bg-slate-800 dark:text-white"
               />
             </div>
 
-            {draftTooBig && (
+            {bayarBerlebih && (
               <p className="mt-1.5 text-xs text-rose-600 dark:text-rose-400">
-                Tidak boleh lebih dari {formatRupiah(total)}.
+                Tidak boleh lebih dari sisa utang ({formatRupiah(sisa)}).
               </p>
             )}
 
             <div className="mt-3 flex flex-col gap-2 sm:flex-row">
               <button
                 type="button"
-                disabled={saving || unchanged || draftTooBig}
-                onClick={() => void save(draftValue)}
+                disabled={saving || unchanged || profitInvalid || bayarBerlebih}
+                onClick={() => void save(bayarValue)}
                 className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {saving ? (
@@ -532,14 +680,14 @@ function TransactionCard({ tx, open, onToggle, onSaved }: TransactionCardProps) 
                 ) : (
                   <Save size={16} />
                 )}
-                Simpan sisa utang
+                Simpan perubahan
               </button>
 
               {!lunas && (
                 <button
                   type="button"
-                  disabled={saving}
-                  onClick={() => void save(0)}
+                  disabled={saving || profitInvalid}
+                  onClick={() => void save(sisa)}
                   className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-emerald-300 bg-white px-4 py-2.5 text-sm font-semibold text-emerald-700 transition-colors hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-emerald-800 dark:bg-slate-800 dark:text-emerald-300 dark:hover:bg-emerald-900/20"
                 >
                   <BadgeCheck size={16} />

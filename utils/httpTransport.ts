@@ -1,4 +1,4 @@
-import type { HttpOption } from "@/types7";
+import type { HttpOption } from "@/types";
 
 export type {
   HttpMethod,
@@ -7,7 +7,7 @@ export type {
   ApiEnvelope,
   PageMeta,
   Paginated,
-} from "@/types7";
+} from "@/types";
 
 export class HttpError extends Error {
   readonly status: number;
